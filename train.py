@@ -67,6 +67,51 @@ def array2grid(x):
     return x
 
 
+def log_block_sim_to_wandb(all_sim_mats, global_step):
+    """
+    Log block cosine similarity matrices to WandB.
+
+    Mirrors DiT's approach: wandb.plot.heatmap per timestep + wandb.Table
+    for raw values + average matrix across tracked timesteps.
+
+    Args:
+        all_sim_mats: dict {step_idx (int): sim_mat (L, L) numpy array}
+        global_step: current training step
+    """
+    L = next(iter(all_sim_mats.values())).shape[0]
+    block_labels = [f"Block {i}" for i in range(L)]
+    log_dict = {}
+
+    for t_idx, sim_mat in sorted(all_sim_mats.items()):
+        key = f"{t_idx:03d}"
+        # Heatmap (same API as DiT)
+        log_dict[f"block_sim/heatmap_step_{key}"] = wandb.plot.heatmap(
+            x_labels=block_labels,
+            y_labels=block_labels,
+            matrix_values=sim_mat.tolist(),
+            show_text=True,
+            title=f"Block Cosine Sim | train={global_step} | denoise={t_idx}",
+        )
+        # Raw matrix as Table (same as DiT)
+        log_dict[f"block_sim/table_step_{key}"] = wandb.Table(
+            data=sim_mat.tolist(),
+            columns=[f"Block_{i}" for i in range(L)],
+        )
+
+    # Average similarity matrix across all tracked timesteps (same as DiT)
+    import numpy as np
+    avg_mat = np.mean(list(all_sim_mats.values()), axis=0)
+    log_dict["block_sim/heatmap_avg"] = wandb.plot.heatmap(
+        x_labels=block_labels,
+        y_labels=block_labels,
+        matrix_values=avg_mat.tolist(),
+        show_text=True,
+        title=f"Block Cosine Sim (avg across timesteps) | train={global_step}",
+    )
+
+    wandb.log(log_dict, step=global_step)
+
+
 @torch.no_grad()
 def sample_posterior(moments, latents_scale=1., latents_bias=0.):
     device = moments.device
@@ -340,18 +385,32 @@ def main(args):
 
             if (global_step == 1 or (global_step % args.sampling_steps == 0 and global_step > 0)):
                 from samplers import euler_sampler
+                # Collect block cosine similarity every 50000 training steps.
+                # Timestep indices follow the guide: t=1,4,8,32,64,127 (1-indexed -> 0-indexed: 0,3,7,31,63,126).
+                # Indices >= num_steps are silently ignored by the sampler.
+                BLOCK_SIM_STEP_INDICES = [0, 3, 7, 31, 63, 126]
+                do_block_sim = (global_step % 50000 == 0 and global_step > 0)
+
                 with torch.no_grad():
-                    samples = euler_sampler(
-                        model, 
-                        xT, 
+                    sampling_result = euler_sampler(
+                        model,
+                        xT,
                         ys,
-                        num_steps=50, 
+                        num_steps=50,
                         cfg_scale=4.0,
                         guidance_low=0.,
                         guidance_high=1.,
                         path_type=args.path_type,
                         heun=False,
-                    ).to(torch.float32)
+                        collect_block_sim_at=BLOCK_SIM_STEP_INDICES if do_block_sim else None,
+                    )
+                    if do_block_sim:
+                        samples, all_sim_mats = sampling_result
+                        samples = samples.to(torch.float32)
+                    else:
+                        samples = sampling_result.to(torch.float32)
+                        all_sim_mats = {}
+
                     samples = vae.decode((samples -  latents_bias) / latents_scale).sample
                     gt_samples = vae.decode((gt_xs - latents_bias) / latents_scale).sample
                     samples = (samples + 1) / 2.
@@ -361,6 +420,12 @@ def main(args):
                 accelerator.log({"samples": wandb.Image(array2grid(out_samples)),
                                  "gt_samples": wandb.Image(array2grid(gt_samples))})
                 logging.info("Generating EMA samples done.")
+
+                # Log block cosine similarity matrices to WandB every 50000 steps
+                if do_block_sim and accelerator.is_main_process and all_sim_mats:
+                    sim_mats_np = {k: v.numpy() for k, v in all_sim_mats.items()}
+                    log_block_sim_to_wandb(sim_mats_np, global_step)
+                    logging.info(f"Logged block similarity matrices for {len(all_sim_mats)} timesteps.")
 
             logs = {
                 "loss": accelerator.gather(loss_mean).mean().detach().item(), 

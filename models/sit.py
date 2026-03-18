@@ -262,12 +262,14 @@ class SiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, w * p))
         return imgs
     
-    def forward(self, x, t, y, return_logvar=False):
+    def forward(self, x, t, y, return_logvar=False, return_block_tokens=False):
         """
         Forward pass of SiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
+        return_block_tokens: if True, also return list of hidden token tensors from each block,
+                             each of shape [N, T, D]. Useful for block-wise cosine similarity analysis.
         """
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         N, T, D = x.shape
@@ -277,13 +279,19 @@ class SiT(nn.Module):
         y = self.y_embedder(y, self.training)    # (N, D)
         c = t_embed + y                                # (N, D)
 
+        block_tokens = [] if return_block_tokens else None
+
         for i, block in enumerate(self.blocks):
             x = block(x, c)                      # (N, T, D)
+            if return_block_tokens:
+                block_tokens.append(x)           # save end-of-block output for each block
             if (i + 1) == self.encoder_depth:
                 zs = [projector(x.reshape(-1, D)).reshape(N, T, -1) for projector in self.projectors]
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
 
+        if return_block_tokens:
+            return x, zs, block_tokens
         return x, zs
 
 
