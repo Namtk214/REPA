@@ -67,46 +67,55 @@ def array2grid(x):
     return x
 
 
-def log_block_sim_to_wandb(all_sim_mats, global_step):
+def log_block_sim(all_sim_mats, global_step):
     """
-    Log block cosine similarity matrices to WandB.
+    Visualize block cosine similarity matrices and log to WandB as images.
 
-    Mirrors DiT's approach: wandb.plot.heatmap per timestep + wandb.Table
-    for raw values + average matrix across tracked timesteps.
+    Creates one heatmap per tracked denoising step plus an average heatmap,
+    then logs them to WandB via wandb.Image (using matplotlib Agg backend —
+    no display required).
 
     Args:
-        all_sim_mats: dict {step_idx (int): sim_mat (L, L) numpy array}
-        global_step: current training step
+        all_sim_mats: dict {step_idx (int): sim_mat [L, L] numpy array}
+        global_step: current training step (used for WandB step and titles)
     """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import io
+    from PIL import Image as PILImage
+
     L = next(iter(all_sim_mats.values())).shape[0]
-    block_labels = [f"Block {i}" for i in range(L)]
+    block_ticks = list(range(L))
+
+    def _make_heatmap_image(mat, title):
+        fig, ax = plt.subplots(figsize=(5, 4))
+        im = ax.imshow(mat, vmin=-1, vmax=1, cmap="RdBu_r", aspect="auto")
+        plt.colorbar(im, ax=ax)
+        ax.set_xticks(block_ticks)
+        ax.set_yticks(block_ticks)
+        ax.set_xticklabels(block_ticks, fontsize=7)
+        ax.set_yticklabels(block_ticks, fontsize=7)
+        ax.set_xlabel("Block index", fontsize=8)
+        ax.set_ylabel("Block index", fontsize=8)
+        ax.set_title(title, fontsize=8)
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", dpi=100)
+        buf.seek(0)
+        img = PILImage.open(buf).copy()
+        buf.close()
+        plt.close(fig)
+        return wandb.Image(img)
+
     log_dict = {}
-
     for t_idx, sim_mat in sorted(all_sim_mats.items()):
-        key = f"{t_idx:03d}"
-        # Heatmap (same API as DiT)
-        log_dict[f"block_sim/heatmap_step_{key}"] = wandb.plot.heatmap(
-            x_labels=block_labels,
-            y_labels=block_labels,
-            matrix_values=sim_mat.tolist(),
-            show_text=True,
-            title=f"Block Cosine Sim | train={global_step} | denoise={t_idx}",
-        )
-        # Raw matrix as Table (same as DiT)
-        log_dict[f"block_sim/table_step_{key}"] = wandb.Table(
-            data=sim_mat.tolist(),
-            columns=[f"Block_{i}" for i in range(L)],
-        )
+        title = f"Block Cosine Sim | train={global_step} | denoise={t_idx}"
+        log_dict[f"block_sim/step_{t_idx:03d}"] = _make_heatmap_image(sim_mat, title)
 
-    # Average similarity matrix across all tracked timesteps (same as DiT)
-    import numpy as np
     avg_mat = np.mean(list(all_sim_mats.values()), axis=0)
-    log_dict["block_sim/heatmap_avg"] = wandb.plot.heatmap(
-        x_labels=block_labels,
-        y_labels=block_labels,
-        matrix_values=avg_mat.tolist(),
-        show_text=True,
-        title=f"Block Cosine Sim (avg across timesteps) | train={global_step}",
+    log_dict["block_sim/avg"] = _make_heatmap_image(
+        avg_mat, f"Block Cosine Sim (avg) | train={global_step}"
     )
 
     wandb.log(log_dict, step=global_step)
@@ -322,7 +331,7 @@ def main(args):
     n = ys.size(0)
     xT = torch.randn((n, 4, latent_size, latent_size), device=device)
         
-    for epoch in range(args.epochs):
+    for _ in range(args.epochs):
         model.train()
         for raw_image, x, y in train_dataloader:
             raw_image = raw_image.to(device)
@@ -424,7 +433,7 @@ def main(args):
                 # Log block cosine similarity matrices to WandB every 50000 steps
                 if do_block_sim and accelerator.is_main_process and all_sim_mats:
                     sim_mats_np = {k: v.numpy() for k, v in all_sim_mats.items()}
-                    log_block_sim_to_wandb(sim_mats_np, global_step)
+                    log_block_sim(sim_mats_np, global_step)
                     logging.info(f"Logged block similarity matrices for {len(all_sim_mats)} timesteps.")
 
             logs = {
