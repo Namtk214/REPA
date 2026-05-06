@@ -36,7 +36,7 @@ def main(args):
     # Randomly select 17 classes from 1000 ImageNet classes
     # Use the seed for reproducibility
     torch.manual_seed(args.global_seed)
-    num_target_classes = 5
+    num_target_classes = 20
     target_classes = torch.randperm(args.num_classes)[:num_target_classes].tolist()
     target_classes.sort()  # Sort for easier tracking
 
