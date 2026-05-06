@@ -33,27 +33,12 @@ def main(args):
     torch.cuda.set_device(device)
     print(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
 
-    # Define the 17 classes you want to generate
-    # You can change these class indices
-    target_classes = [
-        207,  # Golden Retriever
-        281,  # Tabby Cat
-        292,  # Tiger
-        933,  # Cheeseburger
-        970,  # Espresso
-        980,  # Volcano
-        85,   # Macaw
-        404,  # Airliner
-        717,  # Pickup Truck
-        898,  # Water Bottle
-        1,    # Goldfish
-        388,  # Giant Panda
-        945,  # Strawberry
-        417,  # Balloon
-        609,  # Laptop
-        924,  # Guacamole
-        530,  # Dumbbell
-    ]
+    # Randomly select 17 classes from 1000 ImageNet classes
+    # Use the seed for reproducibility
+    torch.manual_seed(args.global_seed)
+    num_target_classes = 17
+    target_classes = torch.randperm(args.num_classes)[:num_target_classes].tolist()
+    target_classes.sort()  # Sort for easier tracking
 
     images_per_class = 12  # 12 images per class
 
